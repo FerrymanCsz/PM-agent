@@ -150,20 +150,45 @@ class InterviewAgent:
         except Exception as e:
             print(f"简历检索失败: {e}")
 
-        # 2. 检索知识库（技术问题）
-        if phase in ["technical", "project_experience"]:
-            try:
-                knowledge_results = self.vector_manager.search_knowledge(
-                    query=last_message,
-                    category="technical",
-                    top_k=3
-                )
-                all_context.extend([
-                    f"[知识库-{r['category']}] {r['content'][:300]}"
-                    for r in knowledge_results
-                ])
-            except Exception as e:
-                print(f"知识库检索失败: {e}")
+        # 2. 检索知识库（根据问题类型选择知识类型）
+        knowledge_type_mapping = {
+            "technical": "technical",
+            "project_experience": "technical",
+            "behavioral": "behavioral",
+            "career_planning": "career",
+            "self_intro": "general",
+            "salary": "career",
+            "general": "general"
+        }
+        
+        target_knowledge_type = knowledge_type_mapping.get(phase, "general")
+        
+        try:
+            # 根据问题类型检索对应的知识
+            knowledge_results = self.vector_manager.search_knowledge(
+                query=last_message,
+                knowledge_type=target_knowledge_type,
+                source_type="knowledge",  # 只搜索手动上传的知识库
+                top_k=3
+            )
+            
+            # 格式化知识库结果
+            for r in knowledge_results:
+                header_path = r.get('header_path', '')
+                section = r.get('section', '')
+                content = r['content'][:300]
+                
+                # 构建上下文标识
+                context_label = f"[知识库-{r['category']}]"
+                if header_path:
+                    context_label += f"[{header_path}]"
+                elif section:
+                    context_label += f"[{section}]"
+                
+                all_context.append(f"{context_label} {content}")
+                
+        except Exception as e:
+            print(f"知识库检索失败: {e}")
 
         thinking = {
             "step": "知识检索",

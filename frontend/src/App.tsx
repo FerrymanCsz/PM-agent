@@ -15,6 +15,7 @@ import ChatPage from './pages/ChatPage'
 import ResumePage from './pages/ResumePage'
 import JobPage from './pages/JobPage'
 import LLMConfigPage from './pages/LLMConfigPage'
+import KnowledgePage from './pages/KnowledgePage'
 import './App.css'
 
 const { Header, Sider, Content } = Layout
@@ -147,7 +148,7 @@ const App: React.FC = () => {
       case 'resume':
         return <ResumePage />
       case 'knowledge':
-        return <div style={{ padding: '24px' }}>知识库管理（开发中）</div>
+        return <KnowledgePage />
       case 'job':
         return <JobPage />
       case 'llm-config':
