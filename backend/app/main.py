@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import settings
 from app.models.database import init_db
-from app.api import chat, resume, llm_config
+from app.api import chat, resume, llm_config, job, knowledge
 
 
 @asynccontextmanager
@@ -48,6 +48,8 @@ app.add_middleware(
 app.include_router(chat.router)
 app.include_router(resume.router)
 app.include_router(llm_config.router)
+app.include_router(job.router)
+app.include_router(knowledge.router)
 
 
 @app.get("/")

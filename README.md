@@ -184,25 +184,42 @@ DEFAULT_LLM_API_KEY=your-api-key-here
 ├── backend/                 # 后端代码
 │   ├── app/
 │   │   ├── api/            # API路由
-│   │   │   ├── chat.py
-│   │   │   ├── llm_config.py
-│   │   │   └── resume.py
+│   │   │   ├── chat.py              # 聊天接口
+│   │   │   ├── llm_config.py        # LLM配置
+│   │   │   ├── resume.py            # 简历管理
+│   │   │   ├── job.py               # 岗位配置
+│   │   │   └── knowledge.py         # 知识库管理
 │   │   ├── core/           # 核心配置
 │   │   │   └── config.py
 │   │   ├── models/         # 数据库模型
 │   │   │   └── database.py
 │   │   ├── services/       # 业务逻辑
-│   │   │   ├── llm_factory.py      # LLM工厂
-│   │   │   ├── resume_parser.py    # 简历解析
-│   │   │   └── interview_agent.py  # Agent核心
+│   │   │   ├── llm_factory.py       # LLM工厂
+│   │   │   ├── resume_parser.py     # 简历解析
+│   │   │   ├── interview_agent.py   # Agent核心
+│   │   │   └── vector_index/        # 向量索引
+│   │   │       ├── base.py
+│   │   │       ├── knowledge_index.py
+│   │   │       ├── resume_index.py
+│   │   │       └── manager.py
 │   │   └── main.py         # 应用入口
 │   ├── requirements.txt
 │   └── run.py
 ├── frontend/               # 前端代码
 │   ├── src/
+│   │   ├── components/     # 公共组件
+│   │   │   ├── ChatMonitor.tsx
+│   │   │   ├── ExperienceCard.tsx
+│   │   │   ├── LLMConfigModal.tsx
+│   │   │   ├── ProjectCard.tsx
+│   │   │   ├── ResumeUploader.tsx
+│   │   │   └── Sidebar.tsx
 │   │   ├── pages/          # 页面
-│   │   │   ├── ChatPage.tsx
-│   │   │   └── ResumePage.tsx
+│   │   │   ├── ChatPage.tsx         # 面试对话
+│   │   │   ├── ResumePage.tsx       # 简历管理
+│   │   │   ├── JobPage.tsx          # 岗位配置
+│   │   │   ├── LLMConfigPage.tsx    # LLM配置
+│   │   │   └── KnowledgePage.tsx    # 知识库管理
 │   │   ├── App.tsx         # 主应用
 │   │   ├── main.tsx        # 入口
 │   │   └── index.css
@@ -218,6 +235,7 @@ DEFAULT_LLM_API_KEY=your-api-key-here
 ├── knowledge_base/         # 知识库文件
 ├── miniconda.exe           # Miniconda安装包（Windows）
 ├── start_backend.bat       # 后端启动脚本
+├── start_services.bat      # 一键启动前后端
 ├── INSTALL.md             # 详细安装指南
 └── README.md              # 项目说明
 ```
@@ -232,17 +250,32 @@ DEFAULT_LLM_API_KEY=your-api-key-here
 ### 2. 简历管理
 - 上传 Word 格式简历
 - 自动解析结构化信息
+- 简历向量化索引
 - Agent以此身份回答
 
-### 3. 知识库
-- 支持 Markdown 文档
-- 自动向量嵌入
+### 3. 知识库管理
+- 支持 Markdown 格式文档上传
+- 智能分块策略（按标题层级分割）
+- 自动向量嵌入（ChromaDB）
+- 支持多级标题结构（1-6级）
 - 面试时自动检索相关内容
 
-### 4. 面试对话
+**知识库元数据：**
+- `source_type`: knowledge(手动上传) / resume(简历生成)
+- `knowledge_type`: technical / behavioral / career / general
+- `category`: 技术分类（backend/frontend/ai等）
+
+### 4. 岗位配置
+- 配置目标岗位信息
+- 设置面试重点和要求
+- Agent根据岗位调整回答策略
+
+### 5. 面试对话
 - 流式输出（SSE）
 - 思考过程可视化
 - 支持多轮对话
+- 对话历史保存
+- 监控数据记录
 
 ## API接口
 
@@ -264,6 +297,9 @@ POST /api/v1/chat/stream
     "resume_data": {...},
     "job_info": {...}
 }
+
+# 获取监控数据
+GET /api/v1/chat/monitor/{session_id}
 ```
 
 ### 简历接口
@@ -277,6 +313,64 @@ GET /api/v1/resumes/list
 
 # 获取当前简历
 GET /api/v1/resumes/current
+
+# 切换当前简历
+POST /api/v1/resumes/{resume_id}/activate
+```
+
+### 知识库接口
+
+```bash
+# 创建文档
+POST /api/v1/knowledge/docs
+{
+    "title": "Redis缓存设计",
+    "content": "## 缓存穿透...",
+    "category": "backend",
+    "knowledge_type": "technical"
+}
+
+# 获取文档列表
+GET /api/v1/knowledge/docs?page=1&category=backend
+
+# 获取文档详情
+GET /api/v1/knowledge/docs/{doc_id}
+
+# 更新文档
+PUT /api/v1/knowledge/docs/{doc_id}
+
+# 删除文档
+DELETE /api/v1/knowledge/docs/{doc_id}
+
+# 搜索知识库
+POST /api/v1/knowledge/search
+{
+    "query": "缓存穿透解决方案",
+    "category": "backend",
+    "top_k": 5
+}
+
+# 获取分类列表
+GET /api/v1/knowledge/categories
+```
+
+### 岗位配置接口
+
+```bash
+# 创建岗位配置
+POST /api/v1/jobs
+{
+    "company": "字节跳动",
+    "position": "后端开发工程师",
+    "department": "基础架构",
+    "requirements": ["熟悉Go/Java", "熟悉Redis/MySQL"]
+}
+
+# 获取岗位列表
+GET /api/v1/jobs/list
+
+# 设置默认岗位
+POST /api/v1/jobs/{job_id}/set-default
 ```
 
 ### LLM配置接口
@@ -290,6 +384,9 @@ POST /api/v1/llm-configs/create
 
 # 测试配置
 POST /api/v1/llm-configs/{config_id}/test
+
+# 设置默认配置
+POST /api/v1/llm-configs/{config_id}/set-default
 ```
 
 ## 常见问题
@@ -333,18 +430,29 @@ rm backend/interview_agent.db
 rm -rf backend/chroma_db
 ```
 
+### Q5: 向量索引检索不到内容？
+
+**解决**: 检查文档是否正确索引
+
+```bash
+# 重新索引现有简历
+python backend/index_existing_resumes.py
+```
+
 ## 开发计划
 
 - [x] 项目初始化
 - [x] 后端基础架构
-- [x] Agent核心工作流
+- [x] Agent核心工作流（LangGraph）
 - [x] 前端聊天界面
-- [x] 简历上传模块
+- [x] 简历上传与解析
+- [x] 简历向量化索引
 - [x] LLM配置界面
-- [ ] 知识库管理
-- [ ] 岗位设置
+- [x] 岗位配置管理
+- [x] 知识库管理（Markdown上传、智能分块）
 - [ ] 联网搜索功能
-- [ ] 自动创建总结文档
+- [ ] 面试评估报告
+- [ ] 自动总结生成知识库
 
 ## 贡献指南
 

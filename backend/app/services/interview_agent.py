@@ -13,12 +13,22 @@ from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, System
 from langchain_core.prompts import ChatPromptTemplate
 
 from app.services.llm_factory import llm_factory
+from app.services.vector_index import vector_index_manager
 from app.models.database import LLMConfig
+from app.core.config import settings
+
+
+class ConversationRound(TypedDict):
+    """对话轮次"""
+    round_number: int  # 轮次编号
+    question: str  # 面试官问题
+    full_response: str  # 候选人完整回答
+    summary: str  # 对话摘要
 
 
 class InterviewState(TypedDict):
     """面试状态定义"""
-    messages: Annotated[List[BaseMessage], operator.add]  # 对话历史
+    messages: Annotated[List[BaseMessage], operator.add]  # 对话历史（LangChain消息格式）
     session_id: str  # 会话ID
     user_id: str  # 用户ID
     current_phase: str  # 当前面试阶段
@@ -27,14 +37,17 @@ class InterviewState(TypedDict):
     knowledge_context: List[str]  # 知识库上下文
     thinking_process: List[Dict]  # 思考过程（用于可视化）
     llm_config: Optional[LLMConfig]  # LLM配置
+    conversation_history: List[ConversationRound]  # 对话历史摘要（用于上下文）
 
 
 class InterviewAgent:
     """面试Agent - 扮演面试者角色"""
-    
+
     def __init__(self, llm_config: Optional[LLMConfig] = None):
         self.llm_config = llm_config
         self.workflow = self._build_workflow()
+        # 引入向量索引管理器
+        self.vector_manager = vector_index_manager
     
     def _build_workflow(self) -> StateGraph:
         """构建LangGraph工作流"""
@@ -105,19 +118,62 @@ class InterviewAgent:
             return "general"
     
     def _retrieve_knowledge(self, state: InterviewState) -> Dict:
-        """从知识库检索相关信息"""
-        
-        # 这里简化处理，实际应该调用向量检索
-        # 从state中获取知识库上下文
-        knowledge_context = state.get("knowledge_context", [])
-        
+        """增强的知识检索（同时检索简历和知识库）"""
+
+        # 获取查询
+        last_message = ""
+        for msg in reversed(state["messages"]):
+            if isinstance(msg, HumanMessage):
+                last_message = msg.content
+                break
+
+        resume_data = state.get("resume_data", {})
+        resume_id = resume_data.get("id", "default")
+        phase = state.get("current_phase", "general")
+
+        all_context = []
+        resume_results = []
+        knowledge_results = []
+
+        # 1. 检索相关简历内容
+        try:
+            resume_results = self.vector_manager.search_resume(
+                query=last_message,
+                resume_id=resume_id,
+                question_type=phase,
+                top_k=3
+            )
+            all_context.extend([
+                f"[简历-{r['type']}] {r['content']}"
+                for r in resume_results
+            ])
+        except Exception as e:
+            print(f"简历检索失败: {e}")
+
+        # 2. 检索知识库（技术问题）
+        if phase in ["technical", "project_experience"]:
+            try:
+                knowledge_results = self.vector_manager.search_knowledge(
+                    query=last_message,
+                    category="technical",
+                    top_k=3
+                )
+                all_context.extend([
+                    f"[知识库-{r['category']}] {r['content'][:300]}"
+                    for r in knowledge_results
+                ])
+            except Exception as e:
+                print(f"知识库检索失败: {e}")
+
         thinking = {
             "step": "知识检索",
             "status": "completed",
-            "detail": f"检索到 {len(knowledge_context)} 条相关知识"
+            "detail": f"从简历检索到 {len(resume_results)} 条，从知识库检索到 {len(knowledge_results)} 条",
+            "sources": [r.get('type') for r in resume_results] + [r.get('category') for r in knowledge_results]
         }
-        
+
         return {
+            "knowledge_context": all_context,
             "thinking_process": state.get("thinking_process", []) + [thinking]
         }
     
@@ -149,16 +205,52 @@ class InterviewAgent:
             "thinking_process": state.get("thinking_process", []) + [thinking]
         }
     
-    def _generate_response(self, state: InterviewState) -> Dict:
-        """生成面试者回答"""
+    async def _generate_response(self, state: InterviewState) -> Dict:
+        """生成面试者回答（异步版本）"""
+        import asyncio
+        from langchain_openai import ChatOpenAI
         
         # 创建LLM
         if state.get("llm_config"):
+            print(f"[DEBUG] Using llm_config from state: model={state['llm_config'].model}, temp={state['llm_config'].temperature}")
             llm = llm_factory.create_llm(state["llm_config"])
         else:
-            # 使用默认配置
-            from langchain_openai import ChatOpenAI
-            llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.7)
+            # 使用默认配置（从settings读取）
+            api_key = settings.DEFAULT_LLM_API_KEY
+            base_url = settings.DEFAULT_LLM_BASE_URL
+            model = settings.DEFAULT_LLM_MODEL
+            
+            if not api_key:
+                # 如果没有配置API key，返回错误提示
+                return {
+                    "messages": [AIMessage(content="抱歉，服务暂时不可用，请稍后重试。错误：未配置LLM API Key")],
+                    "thinking_process": state.get("thinking_process", []) + [{
+                        "step": "生成回答",
+                        "status": "error",
+                        "detail": "未配置LLM API Key"
+                    }]
+                }
+            
+            # 检测是否为 Kimi/Moonshot 模型
+            model_lower = model.lower()
+            is_kimi = "kimi" in model_lower or "moonshot" in model_lower
+            
+            # 构建参数
+            llm_params = {
+                "model": model,
+                "api_key": api_key,
+                "base_url": base_url,
+            }
+            
+            # 对于 Kimi/Moonshot 模型，必须显式设置 temperature=1（使用整数）
+            if is_kimi:
+                llm_params["temperature"] = 1  # 使用整数 1 而不是 1.0
+                print(f"[DEBUG] Kimi/Moonshot model in interview_agent, setting temperature=1")
+            else:
+                llm_params["temperature"] = 0.7
+            
+            print(f"[DEBUG] Creating ChatOpenAI with params: {llm_params}")
+            llm = ChatOpenAI(**llm_params)
         
         # 构建系统Prompt（面试者角色）
         system_prompt = self._build_system_prompt(state)
@@ -166,35 +258,167 @@ class InterviewAgent:
         # 构建消息列表
         messages = [SystemMessage(content=system_prompt)] + state["messages"]
         
-        # 调用LLM生成回答
-        response = llm.invoke(messages)
+        # 在后台线程中调用LLM（避免阻塞事件循环）
+        # 添加重试机制处理429错误
+        max_retries = 3
+        retry_delay = 2  # 秒
+        
+        for attempt in range(max_retries):
+            try:
+                loop = asyncio.get_event_loop()
+                response = await loop.run_in_executor(None, lambda: llm.invoke(messages))
+                break  # 成功则跳出循环
+            except Exception as e:
+                error_msg = str(e)
+                
+                # 检查是否是429错误或引擎过载错误
+                if "429" in error_msg or "overloaded" in error_msg.lower():
+                    if attempt < max_retries - 1:
+                        print(f"[WARN] LLM服务过载 (尝试 {attempt + 1}/{max_retries})，{retry_delay}秒后重试...")
+                        await asyncio.sleep(retry_delay)
+                        retry_delay *= 2  # 指数退避
+                        continue
+                
+                # 其他错误或重试耗尽
+                return {
+                    "messages": [AIMessage(content=f"抱歉，生成回答时出错：{error_msg}。请稍后重试。")],
+                    "thinking_process": state.get("thinking_process", []) + [{
+                        "step": "生成回答",
+                        "status": "error",
+                        "detail": f"LLM调用失败: {error_msg}"
+                    }]
+                }
+        
+        # 解析LLM输出（JSON格式）
+        import json
+        raw_content = response.content.strip()
+        full_response = raw_content
+        summary = ""
+        
+        try:
+            # 尝试提取JSON内容
+            json_content = raw_content.strip()
+            
+            # 尝试直接解析（LLM可能直接输出JSON）
+            try:
+                parsed = json.loads(json_content)
+                full_response = parsed.get("response", raw_content)
+                summary = parsed.get("summary", "")
+            except json.JSONDecodeError:
+                # 如果直接解析失败，尝试提取代码块
+                if "```json" in raw_content:
+                    start = raw_content.find("```json") + 7
+                    end = raw_content.find("```", start)
+                    if end > start:
+                        json_content = raw_content[start:end].strip()
+                elif "```" in raw_content:
+                    start = raw_content.find("```") + 3
+                    end = raw_content.find("```", start)
+                    if end > start:
+                        json_content = raw_content[start:end].strip()
+                
+                # 再次解析
+                parsed = json.loads(json_content)
+                full_response = parsed.get("response", raw_content)
+                summary = parsed.get("summary", "")
+            
+        except json.JSONDecodeError as e:
+            print(f"[WARN] JSON解析失败，使用原始内容: {e}")
+            print(f"[DEBUG] 原始内容前100字: {raw_content[:100]}")
+            # 降级处理：使用原始内容
+            full_response = raw_content
+            summary = raw_content[:200] + "..." if len(raw_content) > 200 else raw_content
+        except Exception as e:
+            print(f"[WARN] 解析LLM输出失败: {e}")
+            full_response = raw_content
+            summary = raw_content[:200] + "..." if len(raw_content) > 200 else raw_content
         
         thinking = {
             "step": "生成回答",
             "status": "completed",
-            "detail": "回答生成完成"
+            "detail": f"回答生成完成，长度: {len(full_response)} 字符，摘要: {len(summary)} 字符"
         }
         
         return {
-            "messages": [AIMessage(content=response.content)],
+            "messages": [AIMessage(content=full_response)],  # 只返回完整回答给用户
+            "full_response": full_response,  # 完整回答
+            "summary": summary,  # 对话摘要
             "thinking_process": state.get("thinking_process", []) + [thinking]
         }
     
-    def _build_system_prompt(self, state: InterviewState) -> str:
-        """构建系统Prompt（面试者角色）"""
+    def _build_conversation_history(self, state: InterviewState, max_rounds: int = 5) -> str:
+        """构建对话历史（摘要形式）"""
+        conversation_history = state.get("conversation_history", [])
         
-        resume = state.get("resume_data", {})
+        if not conversation_history:
+            return "（对话刚开始，暂无历史）"
+        
+        # 只取最近N轮
+        recent_history = conversation_history[-max_rounds:] if len(conversation_history) > max_rounds else conversation_history
+        
+        lines = ["## 对话历史（按时间顺序）"]
+        for round_data in recent_history:
+            round_num = round_data.get("round_number", 0)
+            question = round_data.get("question", "")
+            summary = round_data.get("summary", "")
+            lines.append(f"\n第{round_num}轮:")
+            lines.append(f"  面试官: {question}")
+            lines.append(f"  候选人: {summary}")
+        
+        return "\n".join(lines)
+    
+    def _build_system_prompt(self, state: InterviewState) -> str:
+        """构建系统Prompt（使用向量检索的简历上下文）"""
+
         job = state.get("job_info", {})
         phase = state.get("current_phase", "general")
-        
-        # 基础角色定义
-        prompt = f"""你是一位正在求职的候选人，正在参加一场真实的面试。你需要根据面试官的问题，结合你的简历和知识库内容，给出专业、真实、有说服力的回答。
+        resume_data = state.get("resume_data", {})
+        resume_id = resume_data.get("id", "default")
+        knowledge_context = state.get("knowledge_context", [])
+
+        # 获取最后一条用户消息
+        last_message = ""
+        for msg in reversed(state["messages"]):
+            if isinstance(msg, HumanMessage):
+                last_message = msg.content
+                break
+
+        # 使用向量检索获取相关简历上下文（替代完整的简历JSON）
+        try:
+            resume_context = self.vector_manager.get_resume_prompt_context(
+                resume_id=resume_id,
+                query=last_message,
+                question_type=phase,
+                max_length=2000
+            )
+        except Exception as e:
+            print(f"获取简历上下文失败: {e}")
+            # 降级处理：使用简化版简历信息
+            resume_context = f"""姓名: {resume_data.get('name', '未知')}
+职位: {resume_data.get('title', '未知')}
+技能: {', '.join(resume_data.get('skills', [])[:10])}"""
+
+        # 构建相关经历部分（向量检索结果）
+        related_experience = ""
+        if knowledge_context:
+            related_experience = "\n## 相关经历（从简历中检索到的相关内容）\n"
+            for ctx in knowledge_context[:1]:  # 只显示最相关的1条
+                related_experience += f"{ctx}\n"
+
+        # 构建对话历史
+        conversation_history = self._build_conversation_history(state, max_rounds=5)
+
+        # 构建精简的系统Prompt
+        prompt = f"""你是一位正在求职的候选人，正在参加一场真实的面试。
 
 ## 你的简历信息
-{json.dumps(resume, ensure_ascii=False, indent=2)}
-
+{resume_context}
+{related_experience}
 ## 应聘岗位信息
-{json.dumps(job, ensure_ascii=False, indent=2)}
+- 公司: {job.get('company', '未知')}
+- 职位: {job.get('position', '未知')}
+- 部门: {job.get('department', '未知')}
+- 要求: {', '.join(job.get('requirements', [])[:5])}
 
 ## 当前面试阶段
 {phase}
@@ -203,8 +427,25 @@ class InterviewAgent:
 1. 保持谦逊、自信、专业的态度
 2. 回答要具体、有数据支撑、避免空泛
 3. 不懂的问题诚实承认，不要编造
-4. 展现学习能力和解决问题的思路
-5. 根据面试岗位调整回答的侧重点
+4. 必须基于上面提供的简历信息回答，不要编造任何简历中没有的数据
+5. 展现学习能力和解决问题的思路
+6. 根据面试岗位调整回答的侧重点
+
+{conversation_history}
+
+## 当前问题
+面试官: {last_message}
+
+## 输出格式要求（极其重要）
+你必须严格按以下JSON格式输出，不要输出任何其他内容，不要添加markdown标记，直接输出JSON：
+
+{{"response": "你的完整面试回答，自然口语化，200-400字", "summary": "结构化摘要：1.问题要点 2.核心数据 3.关键逻辑 4.结论"}}
+
+严格要求：
+1. 只输出JSON，不要```json标记
+2. response字段：完整回答内容
+3. summary字段：必须包含4个要素（问题要点、核心数据、关键逻辑、结论）
+4. 示例：{{"response": "面试官您好...", "summary": "问题：自我介绍；数据：2年经验；逻辑：背景→能力→动机；结论：期待加入"}}
 """
         
         # 根据阶段添加特定指导
@@ -234,11 +475,27 @@ class InterviewAgent:
         
         return prompt
     
+    def _should_retrieve_knowledge(self, question_type: str, question: str) -> bool:
+        """判断是否需要检索知识库"""
+        # 技术问题需要检索
+        if question_type == "technical":
+            return True
+        # 项目经验问题需要检索
+        if question_type == "project_experience":
+            return True
+        # 自我介绍需要检索
+        if question_type == "self_intro":
+            return True
+        # 行为问题需要检索
+        if question_type == "behavioral":
+            return True
+        return False
+    
     async def chat(self, session_id: str, user_id: str, message: str, 
                    resume_data: Dict = None, job_info: Dict = None,
                    history: List[Dict] = None) -> Dict:
         """
-        处理面试对话
+        处理面试对话（异步版本）- 动态规划步骤
         
         Args:
             session_id: 会话ID
@@ -249,8 +506,12 @@ class InterviewAgent:
             history: 对话历史
             
         Returns:
-            Dict: 包含回答和思考过程
+            Dict: 包含回答、思考过程和监控数据
         """
+        import time
+        start_time = time.time()
+        step_durations = {}
+        
         # 构建消息列表
         messages = []
         if history:
@@ -263,6 +524,29 @@ class InterviewAgent:
         # 添加当前问题
         messages.append(HumanMessage(content=message))
         
+        # 从历史中提取对话摘要列表
+        conversation_history = []
+        if history:
+            for i, msg in enumerate(history):
+                if msg.get("role") == "assistant":
+                    # 找到对应的用户问题
+                    question = ""
+                    if i > 0 and history[i-1].get("role") == "user":
+                        question = history[i-1].get("content", "")
+                    
+                    # 获取摘要，如果没有摘要则用完整内容的前200字
+                    summary = msg.get("summary", "")
+                    if not summary and msg.get("content"):
+                        summary = msg.get("content", "")[:200] + "..."
+                    
+                    if summary:  # 只有有内容才添加
+                        conversation_history.append({
+                            "round_number": len(conversation_history) + 1,
+                            "question": question,
+                            "full_response": msg.get("content", ""),
+                            "summary": summary
+                        })
+        
         # 构建初始状态
         initial_state = {
             "messages": messages,
@@ -273,23 +557,113 @@ class InterviewAgent:
             "job_info": job_info or {},
             "knowledge_context": [],
             "thinking_process": [],
-            "llm_config": self.llm_config
+            "llm_config": self.llm_config,
+            "conversation_history": conversation_history
         }
         
-        # 执行工作流
-        result = self.workflow.invoke(initial_state)
+        # 步骤1: 理解问题（必须）
+        step_start = time.time()
+        result1 = self._understand_question(initial_state)
+        step_durations["understand_question"] = (time.time() - step_start) * 1000
+        current_state = {**initial_state, **result1}
+        question_type = current_state.get("current_phase", "general")
         
-        # 提取最后一条AI消息
+        # 动态决定后续步骤
+        executed_steps = ["understand_question"]
+        
+        # 步骤2: 知识检索（可选）- 根据问题类型决定
+        step_start = time.time()
+        if self._should_retrieve_knowledge(question_type, message):
+            result2 = self._retrieve_knowledge(current_state)
+            current_state = {**current_state, **result2}
+            executed_steps.append("retrieve_knowledge")
+        else:
+            # 添加跳过的思考记录
+            thinking = {
+                "step": "知识检索",
+                "status": "skipped",
+                "detail": f"问题类型 '{question_type}' 不需要知识库检索"
+            }
+            current_state["thinking_process"] = current_state.get("thinking_process", []) + [thinking]
+        step_durations["retrieve_knowledge"] = (time.time() - step_start) * 1000
+        
+        # 步骤3: 组织回答（必须）
+        step_start = time.time()
+        result3 = self._organize_answer(current_state)
+        current_state = {**current_state, **result3}
+        executed_steps.append("organize_answer")
+        step_durations["organize_answer"] = (time.time() - step_start) * 1000
+        
+        # 步骤4: 生成回答（必须）
+        step_start = time.time()
+        result4 = await self._generate_response(current_state)
+        current_state = {**current_state, **result4}
+        executed_steps.append("generate_response")
+        step_durations["generate_response"] = (time.time() - step_start) * 1000
+        
+        # 计算总耗时
+        total_duration = (time.time() - start_time) * 1000
+        
+        # 记录执行的步骤
+        print(f"[InterviewAgent] 问题类型: {question_type}, 执行步骤: {executed_steps}, 总耗时: {total_duration:.2f}ms")
+        
+        # 提取最后一条AI消息和摘要
         ai_message = None
-        for msg in reversed(result["messages"]):
+        raw_response = ""
+        full_response = ""
+        summary = ""
+        for msg in reversed(result4.get("messages", [])):
             if isinstance(msg, AIMessage):
                 ai_message = msg.content
+                raw_response = msg.content
                 break
+        
+        # 获取完整回答和摘要
+        full_response = result4.get("full_response", raw_response)
+        summary = result4.get("summary", "")
+        
+        # 构建系统提示词（用于监控）
+        system_prompt = self._build_system_prompt(current_state)
+        
+        # 构建监控数据
+        monitor_data = {
+            "input": {
+                "user_message": message,
+                "resume_data": resume_data or {},
+                "job_info": job_info or {},
+                "history": history or []
+            },
+            "prompt": {
+                "system_prompt": system_prompt,
+                "full_messages": [{"role": "system", "content": system_prompt}] + 
+                                [{"role": "user" if isinstance(m, HumanMessage) else "assistant", "content": m.content} 
+                                 for m in messages],
+                "model": self.llm_config.model if self.llm_config else settings.DEFAULT_LLM_MODEL,
+                "temperature": 1.0
+            },
+            "output": {
+                "raw_response": raw_response,
+                "full_response": full_response,
+                "summary": summary,
+                "question": message,
+                "thinking_process": current_state.get("thinking_process", []),
+                "parsed_response": ai_message
+            },
+            "stats": {
+                "start_time": start_time,
+                "end_time": time.time(),
+                "duration_ms": total_duration,
+                "step_durations": step_durations
+            }
+        }
         
         return {
             "response": ai_message,
-            "thinking_process": result.get("thinking_process", []),
-            "current_phase": result.get("current_phase", "general")
+            "thinking_process": current_state.get("thinking_process", []),
+            "current_phase": current_state.get("current_phase", "general"),
+            "executed_steps": executed_steps,
+            "monitor_data": monitor_data,
+            "summary": summary  # 将摘要提取到顶层
         }
 
 

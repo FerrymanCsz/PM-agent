@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     
     # 服务器配置
     HOST: str = "0.0.0.0"
-    PORT: int = 9000
+    PORT: int = 5001
     
     # 数据库配置
     DATABASE_URL: str = "sqlite+aiosqlite:///./interview_agent.db"

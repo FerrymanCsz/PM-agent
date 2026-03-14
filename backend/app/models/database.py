@@ -3,7 +3,7 @@
 """
 from datetime import datetime
 from typing import List, Optional
-from sqlalchemy import Column, String, DateTime, Text, JSON, Boolean, ForeignKey, Integer
+from sqlalchemy import Column, String, DateTime, Text, JSON, Boolean, ForeignKey, Integer, Float
 from sqlalchemy.ext.asyncio import AsyncAttrs, create_async_engine, AsyncSession
 from sqlalchemy.orm import DeclarativeBase, relationship, sessionmaker
 from sqlalchemy.dialects.sqlite import JSON as SQLiteJSON
@@ -46,7 +46,7 @@ class LLMConfig(Base):
     base_url = Column(String, nullable=False)
     api_key = Column(String, nullable=False)  # 加密存储
     model = Column(String, nullable=False)
-    temperature = Column(SQLiteJSON, default=0.7)
+    temperature = Column(Float, default=1.0)  # kimik2.5 只支持 temperature=1
     max_tokens = Column(Integer, default=4096)
     timeout = Column(Integer, default=60)
     is_default = Column(Boolean, default=False)
@@ -148,6 +148,34 @@ class JobConfig(Base):
     
     # 关系
     user = relationship("User", back_populates="job_configs")
+
+
+class ChatMonitor(Base):
+    """聊天监控数据表"""
+    __tablename__ = "chat_monitors"
+    
+    id = Column(String, primary_key=True)
+    session_id = Column(String, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False)
+    message_id = Column(String, ForeignKey("messages.id", ondelete="CASCADE"), nullable=False)
+    round_number = Column(Integer, nullable=False)  # 对话轮次
+    
+    # 输入信息
+    input_data = Column(SQLiteJSON, default=dict)  # user_message, resume_data, job_info, history
+    
+    # Prompt 信息
+    prompt_data = Column(SQLiteJSON, default=dict)  # system_prompt, full_messages, model, temperature
+    
+    # 输出信息
+    output_data = Column(SQLiteJSON, default=dict)  # raw_response, thinking_process, parsed_response
+    
+    # 性能统计
+    stats = Column(SQLiteJSON, default=dict)  # start_time, end_time, duration_ms, step_durations
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # 关系
+    session = relationship("Session")
+    message = relationship("Message")
 
 
 # 数据库引擎和会话

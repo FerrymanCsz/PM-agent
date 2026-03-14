@@ -1,8 +1,9 @@
 import React, { useState, useRef, useEffect } from 'react'
-import { Card, Input, Button, Space, Typography, Spin, Collapse, Tag } from 'antd'
-import { SendOutlined, UserOutlined, RobotOutlined, LoadingOutlined } from '@ant-design/icons'
+import { Card, Input, Button, Space, Typography, Spin, Collapse, Tag, message } from 'antd'
+import { SendOutlined, UserOutlined, RobotOutlined, LoadingOutlined, EyeOutlined } from '@ant-design/icons'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import MonitorPanel from '../components/MonitorPanel'
 
 const { TextArea } = Input
 const { Title, Text } = Typography
@@ -13,6 +14,7 @@ interface Message {
   role: 'user' | 'assistant'
   content: string
   thinking?: ThinkingStep[]
+  summary?: string  // 对话摘要
   timestamp: Date
 }
 
@@ -22,11 +24,37 @@ interface ThinkingStep {
   detail: string
 }
 
-const ChatPage: React.FC = () => {
+interface ResumeData {
+  id?: string
+  name: string
+  education: Array<{ school: string; major: string; degree?: string }>
+  experience: Array<{ company: string; position: string; description?: string }>
+  skills?: string[]
+  projects?: Array<{ name: string; description?: string; role?: string }>
+}
+
+interface JobData {
+  company: string
+  position: string
+  level?: string
+}
+
+interface ChatPageProps {
+  sessionId?: string
+  onSessionCreated?: (id: string) => void
+}
+
+const ChatPage: React.FC<ChatPageProps> = ({ sessionId: propSessionId, onSessionCreated }) => {
   const [messages, setMessages] = useState<Message[]>([])
   const [inputValue, setInputValue] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [thinkingProcess, setThinkingProcess] = useState<ThinkingStep[]>([])
+  const [resumeData, setResumeData] = useState<ResumeData | null>(null)
+  const [jobData, setJobData] = useState<JobData | null>(null)
+  const [loadingConfig, setLoadingConfig] = useState(true)
+  const [sessionId, setSessionId] = useState<string>(propSessionId || '')
+  const [monitorVisible, setMonitorVisible] = useState(false)
+  const [currentRound, setCurrentRound] = useState(1)
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
   // 自动滚动到底部
@@ -37,6 +65,64 @@ const ChatPage: React.FC = () => {
   useEffect(() => {
     scrollToBottom()
   }, [messages])
+
+  // 获取当前简历和岗位配置，以及历史消息
+  useEffect(() => {
+    const fetchConfig = async () => {
+      setLoadingConfig(true)
+      try {
+        // 获取当前简历
+        const resumeResponse = await fetch('/api/v1/resumes/current')
+        if (resumeResponse.ok) {
+          const resume = await resumeResponse.json()
+          // 将简历ID合并到parsed_data中
+          setResumeData({
+            id: resume.id,
+            ...resume.parsed_data
+          })
+        }
+
+        // 获取当前岗位配置
+        const jobResponse = await fetch('/api/v1/jobs/current')
+        if (jobResponse.ok) {
+          const job = await jobResponse.json()
+          setJobData(job)
+        }
+
+        // 如果有sessionId，加载历史消息
+        if (propSessionId) {
+          const historyResponse = await fetch(`/api/v1/chat/sessions/${propSessionId}/messages`)
+          if (historyResponse.ok) {
+            const data = await historyResponse.json()
+            setSessionId(propSessionId)
+            
+            // 转换消息格式
+            const historyMessages: Message[] = data.messages.map((m: any) => ({
+              id: m.id,
+              role: m.role,
+              content: m.content,
+              thinking: m.meta_data?.thinking_process,
+              timestamp: new Date(m.created_at)
+            }))
+            setMessages(historyMessages)
+            setCurrentRound(Math.ceil(historyMessages.length / 2) + 1)
+          }
+        } else {
+          // 新会话，清空消息
+          setMessages([])
+          setSessionId('')
+          setCurrentRound(1)
+        }
+      } catch (error) {
+        console.error('获取配置失败:', error)
+        message.warning('无法获取简历或岗位配置，将使用默认设置')
+      } finally {
+        setLoadingConfig(false)
+      }
+    }
+
+    fetchConfig()
+  }, [propSessionId])
 
   // 发送消息
   const handleSend = async () => {
@@ -56,26 +142,27 @@ const ChatPage: React.FC = () => {
 
     try {
       // 调用后端API（非流式版本用于测试）
-      const response = await fetch('http://localhost:8000/api/v1/chat/message', {
+      const response = await fetch('/api/v1/chat/message', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
+          session_id: sessionId || undefined,
           message: userMessage.content,
-          resume_data: {
-            name: '张三',
-            education: [{ school: '北京大学', major: '计算机科学' }],
-            experience: [{ company: '字节跳动', position: '后端开发实习生' }]
+          resume_data: resumeData || {
+            name: '候选人',
+            education: [],
+            experience: []
           },
-          job_info: {
-            company: '腾讯',
-            position: 'Java后端开发',
-            level: 'P6'
+          job_info: jobData || {
+            company: '未知公司',
+            position: '未知岗位'
           },
           history: messages.map(m => ({
             role: m.role,
-            content: m.content
+            content: m.content,
+            summary: m.summary  // 传递对话摘要
           }))
         })
       })
@@ -85,12 +172,25 @@ const ChatPage: React.FC = () => {
       }
 
       const data = await response.json()
+      
+      // 保存 session_id
+      if (data.session_id && !sessionId) {
+        setSessionId(data.session_id)
+        // 通知父组件新会话已创建
+        if (onSessionCreated) {
+          onSessionCreated(data.session_id)
+        }
+      }
+      
+      // 更新当前轮次（请求成功后）
+      setCurrentRound(prev => prev + 1)
 
       const assistantMessage: Message = {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
         content: data.response,
         thinking: data.thinking_process,
+        summary: data.summary,  // 保存对话摘要
         timestamp: new Date()
       }
 
@@ -98,11 +198,12 @@ const ChatPage: React.FC = () => {
       setThinkingProcess(data.thinking_process || [])
     } catch (error) {
       console.error('发送消息失败:', error)
-      // 添加错误消息
+      // 添加错误消息，显示具体错误
+      const errorDetail = error instanceof Error ? error.message : '未知错误'
       const errorMessage: Message = {
         id: (Date.now() + 1).toString(),
         role: 'assistant',
-        content: '抱歉，服务暂时不可用，请稍后重试。',
+        content: `抱歉，服务暂时不可用。\n\n错误详情：${errorDetail}`,
         timestamp: new Date()
       }
       setMessages(prev => [...prev, errorMessage])
@@ -125,7 +226,25 @@ const ChatPage: React.FC = () => {
       <Card style={{ marginBottom: '16px' }}>
         <Space>
           <Title level={4} style={{ margin: 0 }}>面试模拟</Title>
-          <Tag color="blue">腾讯 · Java后端开发</Tag>
+          {loadingConfig ? (
+            <Tag color="default">加载中...</Tag>
+          ) : jobData ? (
+            <Tag color="blue">{jobData.company} · {jobData.position}{jobData.level ? ` · ${jobData.level}` : ''}</Tag>
+          ) : (
+            <Tag color="orange">未配置岗位</Tag>
+          )}
+          {resumeData && (
+            <Tag color="green">{resumeData.name}</Tag>
+          )}
+          {sessionId && (
+            <Button 
+              type="link" 
+              icon={<EyeOutlined />}
+              onClick={() => setMonitorVisible(true)}
+            >
+              监控面板
+            </Button>
+          )}
         </Space>
       </Card>
 
@@ -252,6 +371,14 @@ const ChatPage: React.FC = () => {
           </Button>
         </Space>
       </Card>
+      
+      {/* 监控面板弹窗 */}
+      <MonitorPanel
+        visible={monitorVisible}
+        sessionId={sessionId}
+        roundNumber={currentRound - 1}
+        onClose={() => setMonitorVisible(false)}
+      />
     </div>
   )
 }

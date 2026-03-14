@@ -44,6 +44,7 @@ async def upload_resume(
     # 重置文件指针
     await file.seek(0)
     
+    file_path = None
     try:
         # 生成唯一ID
         resume_id = str(uuid.uuid4())
@@ -90,7 +91,7 @@ async def upload_resume(
         
     except Exception as e:
         # 清理文件
-        if os.path.exists(file_path):
+        if file_path and os.path.exists(file_path):
             os.remove(file_path)
         raise HTTPException(status_code=500, detail=f"简历处理失败: {str(e)}")
 
@@ -113,8 +114,16 @@ async def list_resumes(
             "created_at": r.created_at.isoformat(),
             "parsed_data": {
                 "name": r.parsed_data.get("name", ""),
+                "phone": r.parsed_data.get("phone", ""),
+                "email": r.parsed_data.get("email", ""),
+                "location": r.parsed_data.get("location", ""),
+                "gender": r.parsed_data.get("gender", ""),
+                "age": r.parsed_data.get("age"),
+                "summary": r.parsed_data.get("summary", ""),
                 "education": r.parsed_data.get("education", []),
-                "experience": r.parsed_data.get("experience", [])
+                "experience": r.parsed_data.get("experience", []),
+                "projects": r.parsed_data.get("projects", []),
+                "skills": r.parsed_data.get("skills", [])
             }
         }
         for r in resumes
