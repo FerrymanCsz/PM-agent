@@ -96,3 +96,11 @@ pnpm-debug.log*
 *.njsproj
 *.sln
 *.sw?
+
+# Test files
+backend/test_*.py
+backend/rebuild_bm25.py
+
+# BM25 index
+bm25_index.db
+*.db-journal

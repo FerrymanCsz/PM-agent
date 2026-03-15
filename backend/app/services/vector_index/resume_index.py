@@ -183,7 +183,8 @@ class ResumeIndex(BaseVectorIndex):
         query: str,
         resume_id: str,
         top_k: int = 3,
-        chunk_types: Optional[List[str]] = None
+        chunk_types: Optional[List[str]] = None,
+        min_score: float = 0.0
     ) -> List[SearchResult]:
         """
         搜索简历相关内容
@@ -193,6 +194,7 @@ class ResumeIndex(BaseVectorIndex):
             resume_id: 简历ID
             top_k: 返回结果数
             chunk_types: 指定搜索的块类型（如 ["project", "experience"]）
+            min_score: 最小相似度阈值
         """
         # ChromaDB 0.5.x 的 where 语法需要使用 $eq 操作符
         filter_dict = {"resume_id": {"$eq": resume_id}}
@@ -210,11 +212,16 @@ class ResumeIndex(BaseVectorIndex):
                 results = self.search(query, type_filter, top_k)
                 all_results.extend(results)
 
-            # 按分数排序并返回top_k
+            # 按分数排序并过滤低分结果
             all_results.sort(key=lambda x: x.score, reverse=True)
+            if min_score > 0:
+                all_results = [r for r in all_results if r.score >= min_score]
             return all_results[:top_k]
 
-        return self.search(query, filter_dict, top_k)
+        results = self.search(query, filter_dict, top_k)
+        if min_score > 0:
+            results = [r for r in results if r.score >= min_score]
+        return results
 
     def get_resume_summary(self, resume_id: str) -> Dict[str, Any]:
         """获取简历摘要（用于提示词）"""

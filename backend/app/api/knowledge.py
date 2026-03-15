@@ -27,15 +27,13 @@ async def create_knowledge_doc(
     {
         "title": "文档标题",
         "content": "Markdown格式的正文内容",
-        "category": "技术分类，如 backend/frontend/ai",
-        "knowledge_type": "知识类型: technical/behavioral/career/general",
+        "category": "分类: general/ai/community/voice_room",
         "source_type": "来源类型: knowledge(手动上传)/resume(简历生成)"
     }
     """
     title = request.get("title", "").strip()
     content = request.get("content", "").strip()
     category = request.get("category", "general")
-    knowledge_type = request.get("knowledge_type", "general")
     source_type = request.get("source_type", "knowledge")
     
     if not title:
@@ -64,7 +62,6 @@ async def create_knowledge_doc(
             "title": title,
             "content": content,
             "category": category,
-            "knowledge_type": knowledge_type,
             "source_type": source_type,
             "is_auto_generated": False
         }
@@ -78,7 +75,6 @@ async def create_knowledge_doc(
             "id": doc_id,
             "title": title,
             "category": category,
-            "knowledge_type": knowledge_type,
             "source_type": source_type,
             "chunk_count": len(embedding_ids),
             "created_at": doc.created_at.isoformat() if doc.created_at else None
@@ -92,7 +88,6 @@ async def create_knowledge_doc(
 @router.get("/docs")
 async def list_knowledge_docs(
     category: Optional[str] = Query(None, description="按分类过滤"),
-    knowledge_type: Optional[str] = Query(None, description="按知识类型过滤"),
     source_type: Optional[str] = Query(None, description="按来源类型过滤"),
     keyword: Optional[str] = Query(None, description="关键词搜索标题"),
     page: int = Query(1, ge=1, description="页码"),
@@ -103,8 +98,7 @@ async def list_knowledge_docs(
     获取知识库文档列表
     
     Args:
-        category: 技术分类过滤
-        knowledge_type: 知识类型过滤 (technical/behavioral/career/general)
+        category: 分类过滤 (general/ai/community/voice_room)
         source_type: 来源类型过滤 (knowledge/resume)
         keyword: 标题关键词搜索
         page: 页码
@@ -140,7 +134,9 @@ async def list_knowledge_docs(
                     "id": d.id,
                     "title": d.title,
                     "category": d.category,
+                    "source_type": "knowledge",  # 手动上传的知识库
                     "is_auto_generated": d.is_auto_generated,
+                    "chunk_count": len(d.embedding_ids) if d.embedding_ids else 0,
                     "source_session_id": d.source_session_id,
                     "created_at": d.created_at.isoformat() if d.created_at else None,
                     "updated_at": d.updated_at.isoformat() if d.updated_at else None
@@ -184,9 +180,11 @@ async def get_knowledge_doc(
             "title": doc.title,
             "content": doc.content,
             "category": doc.category,
+            "source_type": "knowledge",  # 手动上传的知识库
             "is_auto_generated": doc.is_auto_generated,
             "source_session_id": doc.source_session_id,
             "embedding_ids": doc.embedding_ids,
+            "chunk_count": len(doc.embedding_ids) if doc.embedding_ids else 0,
             "structure": structure,
             "created_at": doc.created_at.isoformat() if doc.created_at else None,
             "updated_at": doc.updated_at.isoformat() if doc.updated_at else None
@@ -226,6 +224,9 @@ async def update_knowledge_doc(
         content = request.get("content", "").strip()
         category = request.get("category")
         
+        # 检查内容是否变化（在更新前比较）
+        content_changed = content and content != doc.content
+        
         if title:
             doc.title = title
         if content:
@@ -234,13 +235,14 @@ async def update_knowledge_doc(
             doc.category = category
         
         # 如果内容变化，重建索引
-        if content and content != doc.content:
+        if content_changed:
             doc_data = {
                 "id": doc_id,
                 "title": doc.title,
                 "content": content,
                 "category": doc.category,
-                "is_auto_generated": doc.is_auto_generated
+                "source_type": "knowledge",
+                "is_auto_generated": False
             }
             # 删除旧索引，创建新索引
             vector_index_manager.delete_knowledge_index(doc_id)
@@ -313,14 +315,12 @@ async def search_knowledge(
     {
         "query": "搜索关键词",
         "category": "分类过滤",
-        "knowledge_type": "知识类型过滤",
         "source_type": "来源类型过滤",
         "top_k": 5
     }
     """
     query = request.get("query", "").strip()
     category = request.get("category")
-    knowledge_type = request.get("knowledge_type")
     source_type = request.get("source_type")
     top_k = request.get("top_k", 5)
     
@@ -332,24 +332,80 @@ async def search_knowledge(
         results = vector_index_manager.search_knowledge(
             query=query,
             category=category,
+            source_type=source_type,
             top_k=top_k
         )
         
-        # 进一步过滤（如果需要）
-        filtered_results = results
-        if knowledge_type:
-            filtered_results = [r for r in filtered_results if r.get("knowledge_type") == knowledge_type]
-        if source_type:
-            filtered_results = [r for r in filtered_results if r.get("source_type") == source_type]
-        
         return {
             "query": query,
-            "total": len(filtered_results),
-            "results": filtered_results
+            "total": len(results),
+            "results": results
         }
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"搜索失败: {str(e)}")
+
+
+@router.post("/preview-chunks")
+async def preview_chunks(
+    request: dict,
+):
+    """
+    预览文档分块效果
+    
+    Request Body:
+    {
+        "content": "Markdown内容"
+    }
+    
+    Response:
+    {
+        "chunks": [
+            {
+                "index": 0,
+                "title": "章节标题",
+                "path": "完整路径",
+                "size": 320,
+                "will_split": false,
+                "preview": "内容预览..."
+            }
+        ]
+    }
+    """
+    content = request.get("content", "")
+    
+    if not content:
+        raise HTTPException(status_code=400, detail="内容不能为空")
+    
+    try:
+        # 使用现有的分块逻辑
+        doc_data = {
+            "id": "preview",
+            "title": "预览",
+            "content": content,
+            "category": "general",
+            "source_type": "knowledge",
+            "is_auto_generated": False
+        }
+        
+        chunks = vector_index_manager.knowledge_index.chunk_document(doc_data)
+        
+        return {
+            "chunks": [
+                {
+                    "index": i,
+                    "title": chunk.metadata.get("section_title", f"块{i+1}"),
+                    "path": chunk.metadata.get("header_path", ""),
+                    "size": len(chunk.content),
+                    "will_split": len(chunk.content) > 1000,
+                    "preview": chunk.content[:200] + "..." if len(chunk.content) > 200 else chunk.content
+                }
+                for i, chunk in enumerate(chunks)
+            ]
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"预览失败: {str(e)}")
 
 
 @router.get("/categories")

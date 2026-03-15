@@ -43,7 +43,6 @@ class KnowledgeIndex(BaseVectorIndex):
                 "doc_title": doc_data.get("title", ""),
                 "category": category,
                 "source_type": doc_data.get("source_type", "knowledge"),  # 来源类型: knowledge/resume
-                "knowledge_type": doc_data.get("knowledge_type", "general"),  # 知识类型: technical/behavioral/career/general
                 "is_auto_generated": str(doc_data.get("is_auto_generated", False)),
                 "source_session_id": doc_data.get("source_session_id", "")
             })
@@ -164,28 +163,34 @@ class KnowledgeIndex(BaseVectorIndex):
         Returns:
             List[(section_content, header_info)]
         """
-        # 构建正则表达式，匹配指定级别的标题
-        header_pattern = rf'\n(?=#{"#" * level}\s)'
-        sections = re.split(header_pattern, content)
+        # 找到所有指定级别的标题位置
+        # 构建匹配模式，如 level=2 时匹配 ^##\s+(.+)$
+        hashes = '#' * level
+        header_pattern = rf'^{hashes}\s+(.+)$'
+        headers = list(re.finditer(header_pattern, content, re.MULTILINE))
         
         result = []
-        current_path = []
         
-        for section in sections:
-            section = section.strip()
+        for i, header_match in enumerate(headers):
+            # 确定当前段落的起始和结束位置
+            start = header_match.start()
+            end = headers[i + 1].start() if i + 1 < len(headers) else len(content)
+            
+            # 提取段落内容
+            section = content[start:end].strip()
             if not section:
                 continue
             
-            # 提取当前段的标题信息
-            header_info = self._parse_section_header(section, current_path)
+            # 提取当前段的标题
+            title = header_match.group(1).strip()
             
-            # 更新路径（用于构建标题层级路径）
-            if header_info["level"] <= level:
-                # 重置路径
-                current_path = current_path[:header_info["level"] - 1]
-                current_path.append(header_info["title"])
+            # 构建路径：只包含当前标题（因为是按同级标题分割）
+            header_info = {
+                "level": level,
+                "title": title,
+                "path": title
+            }
             
-            header_info["path"] = " > ".join(current_path)
             result.append((section, header_info))
         
         return result
@@ -419,7 +424,6 @@ class KnowledgeIndex(BaseVectorIndex):
         category: str = None,
         doc_id: str = None,
         source_type: str = None,
-        knowledge_type: str = None,
         top_k: int = 5,
         min_score: float = 0.5
     ) -> List[SearchResult]:
@@ -428,10 +432,9 @@ class KnowledgeIndex(BaseVectorIndex):
 
         Args:
             query: 查询问题
-            category: 指定类别过滤
+            category: 指定类别过滤 (general/ai/community/voice_room)
             doc_id: 指定文档过滤
             source_type: 来源类型过滤 (knowledge/resume)
-            knowledge_type: 知识类型过滤 (technical/behavioral/career/general)
             top_k: 返回结果数
             min_score: 最小相似度阈值
         """
@@ -443,8 +446,6 @@ class KnowledgeIndex(BaseVectorIndex):
             filter_conditions.append({"category": {"$eq": category}})
         if source_type:
             filter_conditions.append({"source_type": {"$eq": source_type}})
-        if knowledge_type:
-            filter_conditions.append({"knowledge_type": {"$eq": knowledge_type}})
 
         # 构建过滤字典
         if len(filter_conditions) == 0:

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback, useRef } from 'react'
 import {
   Card,
   Button,
@@ -13,13 +13,13 @@ import {
   Popconfirm,
   Typography,
   Tooltip,
-  Badge,
   Empty,
   Spin,
   Tabs,
   Descriptions,
   List,
-  Divider
+  Divider,
+  Alert
 } from 'antd'
 import {
   PlusOutlined,
@@ -29,15 +29,16 @@ import {
   EyeOutlined,
   BookOutlined,
   FileTextOutlined,
-  TagsOutlined,
-  InfoCircleOutlined
+  InfoCircleOutlined,
+  ExperimentOutlined
 } from '@ant-design/icons'
 import type { ColumnsType } from 'antd/es/table'
+import MarkdownEditor, { ChunkPreview } from '../components/MarkdownEditor'
 
-const { Title, Text, Paragraph } = Typography
-const { TextArea } = Input
+const { Title, Text } = Typography
 const { Option } = Select
 const { TabPane } = Tabs
+const { Search } = Input
 
 // 知识库文档类型
 interface KnowledgeDoc {
@@ -45,7 +46,6 @@ interface KnowledgeDoc {
   title: string
   content?: string
   category: string
-  knowledge_type: 'technical' | 'behavioral' | 'career' | 'general'
   source_type: 'knowledge' | 'resume'
   is_auto_generated: boolean
   chunk_count?: number
@@ -57,24 +57,23 @@ interface KnowledgeDoc {
   updated_at: string
 }
 
+// 搜索结果类型
+interface SearchResult {
+  content: string
+  doc_id: string
+  doc_title: string
+  category: string
+  header_path?: string
+  section?: string
+  score: number
+}
+
 // 分类选项
 const CATEGORY_OPTIONS = [
-  { value: 'backend', label: '后端开发', color: 'blue' },
-  { value: 'frontend', label: '前端开发', color: 'green' },
-  { value: 'ai', label: '人工智能', color: 'purple' },
-  { value: 'devops', label: '运维/DevOps', color: 'orange' },
-  { value: 'database', label: '数据库', color: 'cyan' },
-  { value: 'architecture', label: '架构设计', color: 'red' },
-  { value: 'soft_skill', label: '软技能', color: 'magenta' },
-  { value: 'general', label: '通用', color: 'default' }
-]
-
-// 知识类型选项
-const KNOWLEDGE_TYPE_OPTIONS = [
-  { value: 'technical', label: '技术知识', color: 'processing' },
-  { value: 'behavioral', label: '行为面试', color: 'warning' },
-  { value: 'career', label: '职业规划', color: 'success' },
-  { value: 'general', label: '通用', color: 'default' }
+  { value: 'general', label: '通用', color: 'default' },
+  { value: 'ai', label: 'AI', color: 'purple' },
+  { value: 'community', label: '社区', color: 'green' },
+  { value: 'voice_room', label: '语音房', color: 'blue' }
 ]
 
 const KnowledgePage: React.FC = () => {
@@ -86,7 +85,6 @@ const KnowledgePage: React.FC = () => {
   const [pageSize, setPageSize] = useState(10)
   const [searchKeyword, setSearchKeyword] = useState('')
   const [filterCategory, setFilterCategory] = useState<string>()
-  const [filterType, setFilterType] = useState<string>()
   
   // 模态框状态
   const [isModalVisible, setIsModalVisible] = useState(false)
@@ -95,6 +93,16 @@ const KnowledgePage: React.FC = () => {
   const [viewingDoc, setViewingDoc] = useState<KnowledgeDoc | null>(null)
   const [form] = Form.useForm()
   const [submitting, setSubmitting] = useState(false)
+  
+  // Markdown编辑器状态
+  const [editorContent, setEditorContent] = useState('')
+  const [chunkPreviews, setChunkPreviews] = useState<ChunkPreview[]>([])
+  const [previewLoading, setPreviewLoading] = useState(false)
+  const previewTimeoutRef = useRef<NodeJS.Timeout | null>(null)
+  
+  // 搜索测试状态
+  const [searchResults, setSearchResults] = useState<SearchResult[]>([])
+  const [searchLoading, setSearchLoading] = useState(false)
 
   // 获取文档列表
   const fetchDocs = useCallback(async () => {
@@ -105,7 +113,6 @@ const KnowledgePage: React.FC = () => {
       params.append('page_size', pageSize.toString())
       if (searchKeyword) params.append('keyword', searchKeyword)
       if (filterCategory) params.append('category', filterCategory)
-      if (filterType) params.append('knowledge_type', filterType)
 
       const response = await fetch(`/api/v1/knowledge/docs?${params}`)
       if (response.ok) {
@@ -121,36 +128,104 @@ const KnowledgePage: React.FC = () => {
     } finally {
       setLoading(false)
     }
-  }, [currentPage, pageSize, searchKeyword, filterCategory, filterType])
+  }, [currentPage, pageSize, searchKeyword, filterCategory])
 
   // 初始加载
   useEffect(() => {
     fetchDocs()
   }, [fetchDocs])
 
+  // 清理定时器
+  useEffect(() => {
+    return () => {
+      if (previewTimeoutRef.current) {
+        clearTimeout(previewTimeoutRef.current)
+      }
+    }
+  }, [])
+
+  // 预览分块
+  const previewChunks = useCallback(async (content: string) => {
+    if (!content || content.length < 50) {
+      setChunkPreviews([])
+      return
+    }
+    
+    setPreviewLoading(true)
+    try {
+      const response = await fetch('/api/v1/knowledge/preview-chunks', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content })
+      })
+      
+      if (response.ok) {
+        const data = await response.json()
+        setChunkPreviews(data.chunks || [])
+      }
+    } catch (error) {
+      console.error('预览分块失败:', error)
+    } finally {
+      setPreviewLoading(false)
+    }
+  }, [])
+
+  // 处理内容变化（带防抖）
+  const handleContentChange = useCallback((content: string) => {
+    setEditorContent(content)
+    form.setFieldsValue({ content })
+    
+    // 清除之前的定时器
+    if (previewTimeoutRef.current) {
+      clearTimeout(previewTimeoutRef.current)
+    }
+    
+    // 设置新的定时器，延迟800ms后预览
+    previewTimeoutRef.current = setTimeout(() => {
+      previewChunks(content)
+    }, 800)
+  }, [form, previewChunks])
+
   // 打开创建模态框
   const handleCreate = () => {
     setEditingDoc(null)
+    setEditorContent('')
+    setChunkPreviews([])
     form.resetFields()
     form.setFieldsValue({
       category: 'general',
-      knowledge_type: 'technical',
-      source_type: 'knowledge'
+      source_type: 'knowledge',
+      content: ''
     })
     setIsModalVisible(true)
   }
 
   // 打开编辑模态框
-  const handleEdit = (doc: KnowledgeDoc) => {
-    setEditingDoc(doc)
-    form.setFieldsValue({
-      title: doc.title,
-      content: doc.content,
-      category: doc.category,
-      knowledge_type: doc.knowledge_type,
-      source_type: doc.source_type
-    })
-    setIsModalVisible(true)
+  const handleEdit = async (doc: KnowledgeDoc) => {
+    try {
+      // 获取完整文档详情（包含 content）
+      const response = await fetch(`/api/v1/knowledge/docs/${doc.id}`)
+      if (!response.ok) {
+        message.error('获取文档详情失败')
+        return
+      }
+      
+      const fullDoc = await response.json()
+      setEditingDoc(fullDoc)
+      const content = fullDoc.content || ''
+      setEditorContent(content)
+      form.setFieldsValue({
+        title: fullDoc.title,
+        content: content,
+        category: fullDoc.category,
+        source_type: fullDoc.source_type
+      })
+      // 立即预览
+      previewChunks(content)
+      setIsModalVisible(true)
+    } catch (error) {
+      message.error('获取文档详情失败')
+    }
   }
 
   // 查看详情
@@ -160,6 +235,7 @@ const KnowledgePage: React.FC = () => {
       if (response.ok) {
         const data = await response.json()
         setViewingDoc(data)
+        setSearchResults([])
         setIsDetailModalVisible(true)
       } else {
         message.error('获取文档详情失败')
@@ -219,14 +295,38 @@ const KnowledgePage: React.FC = () => {
     }
   }
 
+  // 测试搜索
+  const handleSearchTest = async (query: string) => {
+    if (!query.trim() || !viewingDoc) return
+    
+    setSearchLoading(true)
+    try {
+      const response = await fetch('/api/v1/knowledge/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          query,
+          doc_id: viewingDoc.id,
+          top_k: 5
+        })
+      })
+      
+      if (response.ok) {
+        const data = await response.json()
+        setSearchResults(data.results || [])
+      } else {
+        message.error('搜索失败')
+      }
+    } catch (error) {
+      message.error('搜索失败')
+    } finally {
+      setSearchLoading(false)
+    }
+  }
+
   // 获取分类标签颜色
   const getCategoryColor = (category: string) => {
     return CATEGORY_OPTIONS.find(c => c.value === category)?.color || 'default'
-  }
-
-  // 获取知识类型标签
-  const getKnowledgeTypeLabel = (type: string) => {
-    return KNOWLEDGE_TYPE_OPTIONS.find(t => t.value === type)?.label || type
   }
 
   // 表格列定义
@@ -254,18 +354,6 @@ const KnowledgePage: React.FC = () => {
         <Tag color={getCategoryColor(category)}>
           {CATEGORY_OPTIONS.find(c => c.value === category)?.label || category}
         </Tag>
-      )
-    },
-    {
-      title: '类型',
-      dataIndex: 'knowledge_type',
-      key: 'knowledge_type',
-      width: 100,
-      render: (type) => (
-        <Badge 
-          status={type === 'technical' ? 'processing' : type === 'behavioral' ? 'warning' : 'default'}
-          text={getKnowledgeTypeLabel(type)}
-        />
       )
     },
     {
@@ -355,17 +443,6 @@ const KnowledgePage: React.FC = () => {
               <Option key={opt.value} value={opt.value}>{opt.label}</Option>
             ))}
           </Select>
-          <Select
-            placeholder="选择类型"
-            value={filterType}
-            onChange={setFilterType}
-            style={{ width: 150 }}
-            allowClear
-          >
-            {KNOWLEDGE_TYPE_OPTIONS.map(opt => (
-              <Option key={opt.value} value={opt.value}>{opt.label}</Option>
-            ))}
-          </Select>
           <Button type="primary" icon={<PlusOutlined />} onClick={handleCreate}>
             新建文档
           </Button>
@@ -397,10 +474,11 @@ const KnowledgePage: React.FC = () => {
         open={isModalVisible}
         onOk={handleSubmit}
         onCancel={() => setIsModalVisible(false)}
-        width={900}
+        width={1200}
         confirmLoading={submitting}
         okText="保存"
         cancelText="取消"
+        bodyStyle={{ maxHeight: '70vh', overflow: 'auto' }}
       >
         <Form
           form={form}
@@ -415,11 +493,11 @@ const KnowledgePage: React.FC = () => {
             <Input placeholder="请输入文档标题" maxLength={100} showCount />
           </Form.Item>
 
-          <Space style={{ width: '100%' }}>
+          <Space style={{ width: '100%', marginBottom: 16 }}>
             <Form.Item
               name="category"
               label="分类"
-              style={{ width: 200 }}
+              style={{ width: 200, marginBottom: 0 }}
               rules={[{ required: true, message: '请选择分类' }]}
             >
               <Select placeholder="选择分类">
@@ -430,22 +508,9 @@ const KnowledgePage: React.FC = () => {
             </Form.Item>
 
             <Form.Item
-              name="knowledge_type"
-              label="知识类型"
-              style={{ width: 200 }}
-              rules={[{ required: true, message: '请选择类型' }]}
-            >
-              <Select placeholder="选择类型">
-                {KNOWLEDGE_TYPE_OPTIONS.map(opt => (
-                  <Option key={opt.value} value={opt.value}>{opt.label}</Option>
-                ))}
-              </Select>
-            </Form.Item>
-
-            <Form.Item
               name="source_type"
               label="来源类型"
-              style={{ width: 200 }}
+              style={{ width: 200, marginBottom: 0 }}
             >
               <Select disabled>
                 <Option value="knowledge">手动上传</Option>
@@ -456,28 +521,15 @@ const KnowledgePage: React.FC = () => {
 
           <Form.Item
             name="content"
-            label={
-              <Space>
-                <span>内容</span>
-                <Tooltip title="支持 Markdown 格式，建议使用 ## 二级标题组织内容">
-                  <InfoCircleOutlined style={{ color: '#1890ff' }} />
-                </Tooltip>
-              </Space>
-            }
+            label="内容"
             rules={[{ required: true, message: '请输入内容' }]}
+            style={{ marginBottom: 0 }}
           >
-            <TextArea
-              placeholder={`请输入 Markdown 格式内容
-
-示例结构：
-## 主题一
-内容...
-
-## 主题二
-内容...
-`}
-              rows={16}
-              style={{ fontFamily: 'monospace' }}
+            <MarkdownEditor
+              value={editorContent}
+              onChange={handleContentChange}
+              chunkPreviews={chunkPreviews}
+              loading={previewLoading}
             />
           </Form.Item>
         </Form>
@@ -488,7 +540,7 @@ const KnowledgePage: React.FC = () => {
         title="文档详情"
         open={isDetailModalVisible}
         onCancel={() => setIsDetailModalVisible(false)}
-        width={800}
+        width={900}
         footer={[
           <Button key="close" onClick={() => setIsDetailModalVisible(false)}>
             关闭
@@ -535,6 +587,119 @@ const KnowledgePage: React.FC = () => {
                 <Empty description="暂无结构信息" />
               )}
             </TabPane>
+            <TabPane 
+              tab={
+                <Space>
+                  <ExperimentOutlined />
+                  <span>搜索测试</span>
+                </Space>
+              } 
+              key="search"
+            >
+              <Space direction="vertical" style={{ width: '100%' }} size="large">
+                <Alert
+                  message="混合检索测试（向量 + BM25 + RRF融合）"
+                  description="输入搜索词测试混合检索效果。系统会同时使用向量语义检索和BM25关键词检索，通过RRF算法融合排序。"
+                  type="info"
+                  showIcon
+                />
+                
+                <Search
+                  placeholder="输入测试搜索词，例如：缓存穿透解决方案"
+                  enterButton="搜索"
+                  size="large"
+                  loading={searchLoading}
+                  onSearch={handleSearchTest}
+                />
+                
+                {searchResults.length > 0 && (
+                  <div>
+                    <Divider orientation="left">
+                      搜索结果（共 {searchResults.length} 条）
+                    </Divider>
+                    <List
+                      dataSource={searchResults}
+                      renderItem={(item: any, index) => (
+                        <List.Item>
+                          <div style={{ width: '100%' }}>
+                            <div style={{ 
+                              display: 'flex', 
+                              justifyContent: 'space-between',
+                              alignItems: 'center',
+                              marginBottom: 8
+                            }}>
+                              <Space>
+                                <Text strong style={{ fontSize: 14 }}>
+                                  {index + 1}. {item.doc_title}
+                                </Text>
+                                {item.sources && item.sources.map((source: string) => (
+                                  <Tag 
+                                    key={source}
+                                    color={source === 'vector' ? 'blue' : source === 'bm25' ? 'green' : 'default'}
+                                    size="small"
+                                  >
+                                    {source === 'vector' ? '向量' : source === 'bm25' ? 'BM25' : source}
+                                  </Tag>
+                                ))}
+                              </Space>
+                              <Tag color="purple">
+                                RRF: {item.score.toFixed(4)}
+                              </Tag>
+                            </div>
+                            
+                            {/* 显示详细来源信息 */}
+                            {(item.vector_score !== undefined || item.bm25_score !== undefined) && (
+                              <div style={{ 
+                                fontSize: 11, 
+                                color: '#666',
+                                marginBottom: 8
+                              }}>
+                                {item.vector_rank && (
+                                  <span style={{ marginRight: 16 }}>
+                                    向量: 排名#{item.vector_rank} (分数: {item.vector_score.toFixed(3)})
+                                  </span>
+                                )}
+                                {item.bm25_rank && (
+                                  <span>
+                                    BM25: 排名#{item.bm25_rank} (分数: {item.bm25_score.toFixed(3)})
+                                  </span>
+                                )}
+                              </div>
+                            )}
+                            
+                            {(item.header_path || item.section) && (
+                              <div style={{ 
+                                fontSize: 12, 
+                                color: '#666',
+                                marginBottom: 8
+                              }}>
+                                路径: {item.header_path || item.section}
+                              </div>
+                            )}
+                            <div style={{ 
+                              padding: 12,
+                              background: '#f6f8fa',
+                              borderRadius: 6,
+                              fontSize: 13,
+                              lineHeight: 1.6,
+                              color: '#333'
+                            }}>
+                              {item.content.length > 300 
+                                ? item.content.substring(0, 300) + '...' 
+                                : item.content}
+                            </div>
+                          </div>
+                        </List.Item>
+                      )}
+                    />
+                  </div>
+                )}
+                
+                {searchResults.length === 0 && !searchLoading && (
+                  <Empty description="输入搜索词开始测试" />
+                )}
+              </Space>
+            </TabPane>
             <TabPane tab="元数据" key="metadata">
               <Descriptions bordered column={1}>
                 <Descriptions.Item label="ID">{viewingDoc.id}</Descriptions.Item>
@@ -544,11 +709,18 @@ const KnowledgePage: React.FC = () => {
                     {CATEGORY_OPTIONS.find(c => c.value === viewingDoc.category)?.label}
                   </Tag>
                 </Descriptions.Item>
-                <Descriptions.Item label="知识类型">
-                  {getKnowledgeTypeLabel(viewingDoc.knowledge_type)}
-                </Descriptions.Item>
                 <Descriptions.Item label="来源">
                   {viewingDoc.source_type === 'knowledge' ? '手动上传' : '简历生成'}
+                </Descriptions.Item>
+                <Descriptions.Item label="分块数">
+                  {viewingDoc.chunk_count || 0}
+                </Descriptions.Item>
+                <Descriptions.Item label="索引状态">
+                  <Space>
+                    <Tag color="blue">向量索引</Tag>
+                    <Tag color="green">BM25索引</Tag>
+                    <Tag color="purple">RRF融合</Tag>
+                  </Space>
                 </Descriptions.Item>
                 <Descriptions.Item label="创建时间">
                   {new Date(viewingDoc.created_at).toLocaleString('zh-CN')}
